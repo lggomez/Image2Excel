@@ -23,9 +23,9 @@ namespace lggomez.Image2Excel
 
         private static readonly ThreadLocal<Stopwatch> LocalWatch = new ThreadLocal<Stopwatch>(() => Watch);
 
-        private static int previousProgressValue;
+        private static long previousProgressValue;
 
-        private static int processedPixelCount;
+        private static long processedPixelCount;
 
         static void Main(string[] args)
         {
@@ -82,8 +82,8 @@ namespace lggomez.Image2Excel
 
                                                Interlocked.Add(ref processedPixelCount, rowRange.Cells.Count);
 
-                                               long progressValue = (processedPixelCount * 100) / (image.Width * image.Height);
-                                               if (previousProgressValue != progressValue)
+                                               long progressValue = (Interlocked.Read(ref processedPixelCount) * 100) / (image.Width * image.Height);
+                                               if (Interlocked.Read(ref previousProgressValue) != progressValue)
                                                {
                                                    progress?.Report((int)progressValue);
                                                    Interlocked.Exchange(ref previousProgressValue, (int)progressValue);
