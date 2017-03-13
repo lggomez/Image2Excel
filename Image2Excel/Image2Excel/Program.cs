@@ -63,7 +63,7 @@ namespace lggomez.Image2Excel
 
             Console.WriteLine("Converting image...");
 
-            int cellCount = await Task.Run<int>(
+            int currentProgress = await Task.Run<int>(
                                 () =>
                                     {
                                         previousProgressValue = 0;
@@ -106,7 +106,7 @@ namespace lggomez.Image2Excel
                                         return 100;
                                     });
 
-            return cellCount;
+            return currentProgress;
         }
 
         private static void AdjustImageSize(Image image, int excelMaxRows, int excelMaxColumns)
