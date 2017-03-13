@@ -27,6 +27,15 @@ namespace lggomez.Image2Excel
 
         private static long processedPixelCount;
 
+        public class ReportProgressStatus
+        {
+            public int percentage;
+            public int ellapsedMinutes;
+            public int ellapsedSeconds;
+        }
+
+        private static ReportProgressStatus reportProgressStatus { get; set; } = new ReportProgressStatus();
+
         static void Main(string[] args)
         {
             var imagePath = args[0]; //Default command line arg is C:\\1b.jpg
@@ -68,7 +77,7 @@ namespace lggomez.Image2Excel
                                                if (rowRange == null)
                                                {
                                                    throw new InvalidOperationException(
-                                                          "Could not get a range.Check to be sure you have the correct versions of the office DLLs.");
+                                                          "Could not get a range. Check to be sure you have the correct versions of the office DLLs.");
                                                }
 
                                                for (var j = 1; j <= rowRange.Cells.Count; j++)
@@ -198,7 +207,23 @@ namespace lggomez.Image2Excel
 
         static void ReportProgress(int value)
         {
-            Console.WriteLine($"\tConverting: %{value} (elapsed: {LocalWatch.Value.Elapsed.Minutes}m {LocalWatch.Value.Elapsed.Seconds}s)");
+            //TODO: Ideally we wouldn't want this blocking code but we need this to avoid repeating values during reporting
+            lock (reportProgressStatus)
+            {
+                if (value > reportProgressStatus.percentage)
+                {
+                    var minutes = LocalWatch.Value.Elapsed.Minutes;
+                    var seconds = LocalWatch.Value.Elapsed.Seconds;
+
+                    if((reportProgressStatus.ellapsedSeconds != seconds) || (reportProgressStatus.ellapsedMinutes != minutes))
+                    {
+                        reportProgressStatus.percentage = value;
+                        reportProgressStatus.ellapsedMinutes = minutes;
+                        reportProgressStatus.ellapsedSeconds = seconds;
+                        Console.WriteLine($"\tConverting: %{value} (elapsed: {minutes}m {seconds}s)");
+                    }
+                }
+            }
         }
     }
 }
