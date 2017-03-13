@@ -1,14 +1,15 @@
-﻿using ImageSharp;
-using Microsoft.Office.Core;
-using Microsoft.Office.Interop.Excel;
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using ImageSharp;
+using Microsoft.Office.Core;
+using Microsoft.Office.Interop.Excel;
 using Color = System.Drawing.Color;
 using Image = ImageSharp.Image;
 using Shape = Microsoft.Office.Interop.Excel.Shape;
@@ -20,6 +21,8 @@ namespace lggomez.Image2Excel
         private static readonly Stopwatch LocalWatch = Stopwatch.StartNew();
 
         private static int ImageSize;
+
+        private static long CellCount;
 
         public class ReportProgressStatus
         {
@@ -72,10 +75,13 @@ namespace lggomez.Image2Excel
             var imageWidth = image.Width;
 
             Parallel.For(1L, image.Height + 1, i =>
-                {
-                    SetCellColors(image, rowRange, imageWidth, i);
-                });
+            {
+                Debug.WriteLine($"ROW {i} - Starting processing {DateTime.Now.ToLongTimeString()}");
+                SetCellColors(image, rowRange, imageWidth, i);
+                Debug.WriteLine($"ROW {i} - Finished processing {DateTime.Now.ToLongTimeString()}");
+            });
 
+            Marshal.ReleaseComObject(rowRange);
             ResizeCells(excelApplication);
             AdjustExcelWindow(excelApplication);
 
@@ -103,7 +109,28 @@ namespace lggomez.Image2Excel
                 var cell = rowRange.Cells[rowIndex];
                 var pixel = image.Pixels[rowIndex];
 
-                cell.Interior.Color = ColorTranslator.ToOle(Color.FromArgb(pixel.R, pixel.G, pixel.B));
+                try
+                {
+                    cell.Interior.Color = ColorTranslator.ToOle(Color.FromArgb(pixel.R, pixel.G, pixel.B));
+                }
+                catch (COMException ex)
+                {
+                    Debug.Write(ex.ToString());
+                }
+                Marshal.ReleaseComObject(cell);
+            }
+
+            Interlocked.Add(ref CellCount, imageWidth);
+
+            if (CellCount > 200000)
+            {
+                rowRange.ClearFormats();
+                rowRange.Cells.ClearFormats();
+
+                Debug.WriteLine("Starting GC");
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                Interlocked.Exchange(ref CellCount, 0);
             }
 
             ReportProgress(imageWidth);
@@ -150,13 +177,21 @@ namespace lggomez.Image2Excel
             excelApplication.Visible = true;
             excelApplication.WindowState = XlWindowState.xlMaximized;
             excelApplication.ActiveWindow.Zoom = 10;
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            Marshal.ReleaseComObject(excelApplication.Sheets);
+            Marshal.ReleaseComObject(excelApplication.Worksheets);
+            Marshal.ReleaseComObject(excelApplication.Workbooks);
+            Marshal.ReleaseComObject(excelApplication);
         }
 
         private static void ResizeCells(Application excelApplication)
         {
-            ((Worksheet)excelApplication.ActiveSheet).Columns.ColumnWidth = 2;
-            ((Worksheet)excelApplication.ActiveSheet).Rows.EntireColumn.RowHeight =
-                ((Range)((Worksheet)excelApplication.ActiveSheet).Cells[1]).Width;
+            ((Worksheet) excelApplication.ActiveSheet).Columns.ColumnWidth = 2;
+            ((Worksheet) excelApplication.ActiveSheet).Rows.EntireColumn.RowHeight =
+                ((Range) ((Worksheet) excelApplication.ActiveSheet).Cells[1]).Width;
             foreach (Shape shape in excelApplication.ActiveSheet.Shapes)
             {
                 shape.LockAspectRatio = MsoTriState.msoTrue;
@@ -171,18 +206,18 @@ namespace lggomez.Image2Excel
             if (application == null)
             {
                 throw new InvalidOperationException(
-                          "EXCEL could not be started. Check that your office installation and project references are correct.");
+                    "EXCEL could not be started. Check that your office installation and project references are correct.");
             }
 
             application.Visible = false;
 
             Workbook workbook = application.Workbooks.Add(XlWBATemplate.xlWBATWorksheet);
-            Worksheet worksheet = (Worksheet)workbook.Worksheets[1];
+            Worksheet worksheet = (Worksheet) workbook.Worksheets[1];
 
             if (worksheet == null)
             {
                 throw new InvalidOperationException(
-                          "Worksheet could not be created. Check that your office installation and project references are correct.");
+                    "Worksheet could not be created. Check that your office installation and project references are correct.");
             }
 
             return application;
@@ -207,20 +242,23 @@ namespace lggomez.Image2Excel
 
         private static void ReportProgress(int processedCells)
         {
+            Debug.WriteLine($"Start reporting {DateTime.Now.ToLongTimeString()}");
             Interlocked.Add(ref ProgressStatus.ProcessedPixelCount, processedCells);
-            long progressValue = (Interlocked.Read(ref ProgressStatus.ProcessedPixelCount) * 100) / ImageSize;
+            long progressValue = Interlocked.Read(ref ProgressStatus.ProcessedPixelCount) * 100 / ImageSize;
 
             if (Interlocked.Read(ref ProgressStatus.PreviousProgressValue) < progressValue)
             {
                 if (Interlocked.Read(ref ProgressStatus.EllapsedSeconds) != LocalWatch.Elapsed.Seconds)
                 {
-                    Interlocked.Exchange(ref ProgressStatus.Percentage, (int)progressValue);
+                    Interlocked.Exchange(ref ProgressStatus.Percentage, (int) progressValue);
                     Interlocked.Exchange(ref ProgressStatus.EllapsedMinutes, LocalWatch.Elapsed.Minutes);
                     Interlocked.Exchange(ref ProgressStatus.EllapsedSeconds, LocalWatch.Elapsed.Seconds);
-                    Console.WriteLine($"\tConverting: %{(int)progressValue} (elapsed: {Interlocked.Read(ref ProgressStatus.EllapsedMinutes)}m {Interlocked.Read(ref ProgressStatus.EllapsedSeconds)}s)");
+                    Console.WriteLine(
+                        $"\tConverting: %{(int) progressValue} (elapsed: {Interlocked.Read(ref ProgressStatus.EllapsedMinutes)}m {Interlocked.Read(ref ProgressStatus.EllapsedSeconds)}s)");
                 }
-                Interlocked.Exchange(ref ProgressStatus.PreviousProgressValue, (int)progressValue);
+                Interlocked.Exchange(ref ProgressStatus.PreviousProgressValue, (int) progressValue);
             }
+            Debug.WriteLine($"Finished reporting {DateTime.Now.ToLongTimeString()}");
         }
     }
 }
