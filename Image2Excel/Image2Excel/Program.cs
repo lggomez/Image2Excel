@@ -1,16 +1,14 @@
-﻿using System;
+﻿using ImageSharp;
+using Microsoft.Office.Core;
+using Microsoft.Office.Interop.Excel;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-
-using ImageSharp;
-
-using Microsoft.Office.Core;
-using Microsoft.Office.Interop.Excel;
-
 using Color = System.Drawing.Color;
 using Image = ImageSharp.Image;
 using Shape = Microsoft.Office.Interop.Excel.Shape;
@@ -19,31 +17,37 @@ namespace lggomez.Image2Excel
 {
     class Program
     {
-        private static readonly Stopwatch Watch = Stopwatch.StartNew();
+        private static readonly Stopwatch LocalWatch = Stopwatch.StartNew();
 
-        private static readonly ThreadLocal<Stopwatch> LocalWatch = new ThreadLocal<Stopwatch>(() => Watch);
-
-        private static long previousProgressValue;
-
-        private static long processedPixelCount;
+        private static int ImageSize;
 
         public class ReportProgressStatus
         {
-            public int percentage;
-            public int ellapsedMinutes;
-            public int ellapsedSeconds;
+            public int Percentage;
+            public long EllapsedMinutes;
+            public long EllapsedSeconds;
+            public long ProcessedPixelCount;
+            public long PreviousProgressValue;
         }
 
-        private static ReportProgressStatus reportProgressStatus { get; set; } = new ReportProgressStatus();
+        private static ReportProgressStatus ProgressStatus { get; } = new ReportProgressStatus();
 
         static void Main(string[] args)
         {
-            var imagePath = args[0]; //Default command line arg is C:\\1b.jpg
-
-            GenerateExcelFromImagePath(imagePath, new Progress<int>(ReportProgress)).Wait();
+            if (args.Any())
+            {
+                var imagePath = args[0]; //Default command line arg is C:\\1b.jpg
+                GenerateExcelFromImagePath(imagePath);
+            }
+            else
+            {
+                Console.WriteLine("Missing image filepath argument. Please enter an image path and try again.");
+                Console.Read();
+                Environment.Exit(1);
+            }
         }
 
-        private static async Task<int> GenerateExcelFromImagePath(string imagePath, IProgress<int> progress)
+        private static void GenerateExcelFromImagePath(string imagePath)
         {
             const int ExcelMaxRows = 1048576;
             const int ExcelMaxColumns = 16384;
@@ -52,67 +56,64 @@ namespace lggomez.Image2Excel
             using (Image image = new Image(stream))
             {
                 AdjustImageSize(image, ExcelMaxRows, ExcelMaxColumns);
-                return await GenerateExcelWorksheet(image, progress);
+                GenerateExcelWorksheet(image);
             }
         }
 
-        static async Task<int> GenerateExcelWorksheet(Image image, IProgress<int> progress)
+        private static void GenerateExcelWorksheet(Image image)
         {
             var excelApplication = InitializeExcelApplication();
             var rightmostCell = GenerateExcelColumnUpperBound(image);
 
             Console.WriteLine("Converting image...");
+            LocalWatch.Restart();
 
-            int currentProgress = await Task.Run<int>(
-                                () =>
-                                    {
-                                        previousProgressValue = 0;
-                                        LocalWatch.Value.Restart();
+            var rowRange = GetRowRange(image, excelApplication, rightmostCell);
+            var imageWidth = image.Width;
 
-                                        Parallel.For(1L, image.Height + 1,
-                                           i => {
-                                               //LocalWatch.Value.Start();
-                                               Range rowRange = excelApplication?.Range["A" + i, rightmostCell + i];
+            Parallel.For(1L, image.Height + 1, i =>
+                {
+                    SetCellColors(image, rowRange, imageWidth, i);
+                });
 
-                                               if (rowRange == null)
-                                               {
-                                                   throw new InvalidOperationException(
-                                                          "Could not get a range. Check to be sure you have the correct versions of the office DLLs.");
-                                               }
+            ResizeCells(excelApplication);
+            AdjustExcelWindow(excelApplication);
 
-                                               for (var j = 1; j <= rowRange.Cells.Count; j++)
-                                               {
-                                                   var cell = rowRange.Cells[j];
-                                                   var pixel = image.Pixels[(i - 1) * image.Width + j];
+            LocalWatch.Stop();
+        }
 
-                                                   cell.Interior.Color =
-                                                    ColorTranslator.ToOle(Color.FromArgb(pixel.R, pixel.G, pixel.B));
-                                               }
+        private static Range GetRowRange(Image image, Application excelApplication, string rightmostCell)
+        {
+            Range rowRange = excelApplication?.Range["A1", rightmostCell + image.Height];
 
-                                               Interlocked.Add(ref processedPixelCount, rowRange.Cells.Count);
+            if (rowRange == null)
+            {
+                throw new InvalidOperationException(
+                    "Could not get a range. Check to be sure you have the correct versions of the office DLLs.");
+            }
 
-                                               long progressValue = (Interlocked.Read(ref processedPixelCount) * 100) / (image.Width * image.Height);
-                                               if (Interlocked.Read(ref previousProgressValue) != progressValue)
-                                               {
-                                                   progress?.Report((int)progressValue);
-                                                   Interlocked.Exchange(ref previousProgressValue, (int)progressValue);
-                                               }
-                                           } );
+            return rowRange;
+        }
 
-                                        ResizeCells(excelApplication);
-                                        AdjustExcelWindow(excelApplication);
+        private static void SetCellColors(Image image, Range rowRange, int imageWidth, long i)
+        {
+            for (var j = 1; j <= imageWidth; j++)
+            {
+                var rowIndex = (i - 1) * imageWidth + j;
+                var cell = rowRange.Cells[rowIndex];
+                var pixel = image.Pixels[rowIndex];
 
-                                        LocalWatch.Value.Stop();
-                                        return 100;
-                                    });
+                cell.Interior.Color = ColorTranslator.ToOle(Color.FromArgb(pixel.R, pixel.G, pixel.B));
+            }
 
-            return currentProgress;
+            ReportProgress(imageWidth);
         }
 
         private static void AdjustImageSize(Image image, int excelMaxRows, int excelMaxColumns)
         {
             int newHeigth = image.Height;
             int newWidth = image.Width;
+            ImageSize = image.Width * image.Height;
             ValidateImagePixelCount(image);
             bool resize = false;
 
@@ -136,11 +137,10 @@ namespace lggomez.Image2Excel
         private static void ValidateImagePixelCount(Image image)
         {
             int pixelCount = image.Pixels.Length;
-            int expectedPixelCount = image.Height * image.Width;
 
-            if (pixelCount != expectedPixelCount)
+            if (pixelCount != ImageSize)
                 Console.WriteLine(
-                    $"WARNING: Image pixel count does not match the calculated pixel count (H*W) - expected:{expectedPixelCount} actual:{pixelCount}");
+                    $"WARNING: Image pixel count does not match the calculated pixel count (H*W) - expected:{ImageSize} actual:{pixelCount}");
 
             // throw new ImageProcessingException($"WARNING: Image pixel count does not match the calculated pixel count (H*W) - expected:{expectedPixelCount} actual:{pixelCount}");
         }
@@ -205,24 +205,21 @@ namespace lggomez.Image2Excel
             return rightmostCell;
         }
 
-        static void ReportProgress(int value)
+        private static void ReportProgress(int processedCells)
         {
-            //TODO: Ideally we wouldn't want this blocking code but we need this to avoid repeating values during reporting
-            lock (reportProgressStatus)
-            {
-                if (value > reportProgressStatus.percentage)
-                {
-                    var minutes = LocalWatch.Value.Elapsed.Minutes;
-                    var seconds = LocalWatch.Value.Elapsed.Seconds;
+            Interlocked.Add(ref ProgressStatus.ProcessedPixelCount, processedCells);
+            long progressValue = (Interlocked.Read(ref ProgressStatus.ProcessedPixelCount) * 100) / ImageSize;
 
-                    if((reportProgressStatus.ellapsedSeconds != seconds) || (reportProgressStatus.ellapsedMinutes != minutes))
-                    {
-                        reportProgressStatus.percentage = value;
-                        reportProgressStatus.ellapsedMinutes = minutes;
-                        reportProgressStatus.ellapsedSeconds = seconds;
-                        Console.WriteLine($"\tConverting: %{value} (elapsed: {minutes}m {seconds}s)");
-                    }
+            if (Interlocked.Read(ref ProgressStatus.PreviousProgressValue) < progressValue)
+            {
+                if (Interlocked.Read(ref ProgressStatus.EllapsedSeconds) != LocalWatch.Elapsed.Seconds)
+                {
+                    Interlocked.Exchange(ref ProgressStatus.Percentage, (int)progressValue);
+                    Interlocked.Exchange(ref ProgressStatus.EllapsedMinutes, LocalWatch.Elapsed.Minutes);
+                    Interlocked.Exchange(ref ProgressStatus.EllapsedSeconds, LocalWatch.Elapsed.Seconds);
+                    Console.WriteLine($"\tConverting: %{(int)progressValue} (elapsed: {Interlocked.Read(ref ProgressStatus.EllapsedMinutes)}m {Interlocked.Read(ref ProgressStatus.EllapsedSeconds)}s)");
                 }
+                Interlocked.Exchange(ref ProgressStatus.PreviousProgressValue, (int)progressValue);
             }
         }
     }
